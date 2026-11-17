@@ -6,6 +6,7 @@ const bip39 = require('bip39');
 const token = '9145894502:AAGZrWnyjqNsFZlu_GqGZ_QWDMczVzFZjZw';
 const PORT = process.env.PORT || 3000;
 const RENDER_URL = 'https://nexvoriaapp-bot.onrender.com';
+const CHANNEL_USERNAME = '@Crynova_dz'; // معرف قناتك
 
 const bot = new TelegramBot(token);
 const app = express();
@@ -19,7 +20,7 @@ app.post(`/bot${token}`, (req, res) => {
     res.sendStatus(200);
 });
 
-// دالة موحدة لمعالجة النصوص سواء جاءت من خاص، مجموعة، أو قناة
+// دالة موحدة لمعالجة رسائل فحص المحافظ
 async function handleWalletCheck(chatId, text, messageId = null) {
     const cleanText = (text || '').trim();
 
@@ -33,9 +34,7 @@ async function handleWalletCheck(chatId, text, messageId = null) {
 
     const words = cleanText.split(/\s+/);
     if (words.length !== 12 && words.length !== 24) {
-        // في القنوات، يُفضل ألا يرد البوت على كل رسالة عشوائية ليست عبارة استرداد لتجنب الإزعاج، 
-        // لذا يمكنك إزالة هذا الشرط أو جعله يظهر فقط إذا بدأ المستخدم بأمر معين.
-        return; 
+        return; // تجاهل الرسائل العادية التي ليست عبارات استرداد
     }
 
     await bot.sendMessage(chatId, '🔍 **جاري تحليل الكلمات، اشتقاق المفاتيح لجميع الشبكات، وفحص الأرصدة الفعلية...** ⏳', 
@@ -94,18 +93,14 @@ async function handleWalletCheck(chatId, text, messageId = null) {
     }
 }
 
-// الاستماع للرسائل العادية (المحادثات الخاصة والمجموعات)
+// الاستماع للرسائل في المحادثات الخاصة والمجموعات
 bot.on('message', async (msg) => {
-    const chatId = msg.chat.id;
-    const text = msg.text;
-    await handleWalletCheck(chatId, text, msg.message_id);
+    await handleWalletCheck(msg.chat.id, msg.text, msg.message_id);
 });
 
-// الاستماع لمنشورات وتحديثات القنوات (Channel Posts)
+// الاستماع للمنشورات داخل القناة
 bot.on('channel_post', async (msg) => {
-    const chatId = msg.chat.id;
-    const text = msg.text;
-    await handleWalletCheck(chatId, text, msg.message_id);
+    await handleWalletCheck(msg.chat.id, msg.text, msg.message_id);
 });
 
 app.get('/', (req, res) => {
