@@ -1,1 +1,0 @@
-# Nexvoriaapp_bot
