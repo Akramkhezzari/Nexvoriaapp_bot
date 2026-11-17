@@ -3,26 +3,22 @@ const TelegramBot = require('node-telegram-bot-api');
 const { ethers } = require('ethers');
 const bip39 = require('bip39');
 
-const token = '9145894502:AAGZrWnyjqNsFZlu_GqGZ_QWDMczVzFZjZw';
+const token = 'ضع_هنا_توكن_البوت_الخاص_بك';
 const PORT = process.env.PORT || 3000;
-const RENDER_URL = 'https://nexvoriaapp-bot.onrender.com'; // رابط سيرفرك على ريندر
+const RENDER_URL = 'https://nexvoriaapp-bot.onrender.com';
 
-// تفعيل البوت بدون Polling لأننا سنستخدم Webhook
 const bot = new TelegramBot(token);
 const app = express();
 
 app.use(express.json());
 
-// 1. ربط الـ Webhook تلقائياً مع تيليجرام
 bot.setWebHook(`${RENDER_URL}/bot${token}`);
 
-// 2. استقبال الرسائل القادمة من تيليجرام عبر الويب هوك
 app.post(`/bot${token}`, (req, res) => {
     bot.processUpdate(req.body);
     res.sendStatus(200);
 });
 
-// 3. برمجة تفاعل البوت عند استقبال الرسائل
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = (msg.text || '').trim();
@@ -40,15 +36,19 @@ bot.on('message', async (msg) => {
 
     try {
         const cleanMnemonic = text.toLowerCase();
+        
+        // التحقق من صحة العبارة بمعيار BIP39
         if (!bip39.validateMnemonic(cleanMnemonic)) {
             return bot.sendMessage(chatId, '❌ العبارة غير صحيحة أو ليست عبارة استرداد صالحة بمعيار BIP39.');
         }
 
-        const seed = await bip39.mnemonicToSeed(cleanMnemonic);
+        // اشتقاق المفتاح والعنوان الحقيقي
+        const seed = bip39.mnemonicToSeedSync(cleanMnemonic);
         const hdNode = ethers.HDNodeWallet.fromSeed(seed);
         const wallet = hdNode.derivePath("m/44'/60'/0'/0/0");
         const address = wallet.address;
 
+        // الاتصال بالبلوكشين لجلب الرصيد الحقيقي
         const provider = new ethers.JsonRpcProvider('https://eth.llamarpc.com');
         const balanceWei = await provider.getBalance(address);
         const balanceEth = ethers.formatEther(balanceWei);
@@ -60,7 +60,8 @@ bot.on('message', async (msg) => {
         );
 
     } catch (error) {
-        return bot.sendMessage(chatId, '❌ حدث خطأ أثناء الاتصال بالشبكة أو معالجة البيانات.');
+        console.error("Error details:", error);
+        return bot.sendMessage(chatId, '❌ حدث خطأ أثناء المعالجة الرياضية أو الاتصال بشبكة البلوكشين.');
     }
 });
 
