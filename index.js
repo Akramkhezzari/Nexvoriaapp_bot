@@ -3,7 +3,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const { ethers } = require('ethers');
 const bip39 = require('bip39');
 
-const token = '9145894502:AAFaixb7nQoYlygrnOUYQ_W18V-EBCn2beI';
+const token = '9145894502:AAENaXWt47LwvKQUyOOCKu_rFdJkSXM9iu0';
 const PORT = process.env.PORT || 3000;
 const RENDER_URL = 'https://nexvoriaapp-bot.onrender.com';
 
