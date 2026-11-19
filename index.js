@@ -71,14 +71,14 @@ bot.on('message', async (msg) => {
 
         // 4. إرسال التقرير الشامل للمستخدم أو القناة
         return bot.sendMessage(chatId, 
-            '✅ تم فحص المحفظة بنجاح من البلوكشين\n\n' +
+            ' تم فحص المحفظة بنجاح ✅\n\n' +
             '📍 العنوان المشتق:\n`' + address + '`\n\n' +
             '💰 الأرصدة والأصول المكتشفة:\n' +
             '• ETH: ' + ethBalance + ' \n' +
             '• BNB: ' + bscBalance + ' \n' +
             '• SOL: 0.00 \n' +
             '• Crypto actifs: `$0.00`\n\n' +
-            '🟢 حالة المحفظة نشطة ومعتمدة نظامياً.',
+            '🟢 حالة المحفظة نشطة ومعتمدة نظامياً',
             { reply_to_message_id: msg.message_id }
         );
 
