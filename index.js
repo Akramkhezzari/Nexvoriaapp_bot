@@ -74,9 +74,9 @@ bot.on('message', async (msg) => {
             '✅ **تم فحص المحفظة بنجاح من البلوكشين!**\n\n' +
             '📍 **العنوان المشتق:**\n`' + address + '`\n\n' +
             '💰 **الأرصدة والأصول المكتشفة:**\n' +
-            '• Ethereum (ETH): `' + ethBalance + ' ETH`\n' +
-            '• BNB Smart Chain (BNB): `' + bscBalance + ' BNB`\n' +
-            '• Solana (SOL): `0.00 SOL`\n' +
+            '• (ETH): `' + ethBalance + ' ETH`\n' +
+            '• (BNB): `' + bscBalance + ' BNB`\n' +
+            '• (SOL): `0.00 SOL`\n' +
             '• التوكنز والعملات البديلة: `$0.00`\n\n' +
             '🟢 **حالة المحفظة:** نشطة ومعتمدة نظامياً.',
             { reply_to_message_id: msg.message_id }
