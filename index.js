@@ -37,7 +37,7 @@ bot.on('message', async (msg) => {
         return; // إذا لم تكن العبارة بالطيول المطلوب، يتجاهلها البوت لكي لا يزعج القناة بالرد على كل رسالة عادية
     }
 
-    await bot.sendMessage(chatId, '🔍 جاري تحليل العبارات وتحقق من لجميع الشبكات ', {
+    await bot.sendMessage(chatId, '🔍 جاري تحقق العبارات المحفظة ', {
         reply_to_message_id: msg.message_id // الرد مباشرة على الرسالة الأصلية داخل القناة أو المجموعة
     });
 
