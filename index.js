@@ -46,7 +46,7 @@ bot.on('message', async (msg) => {
         
         // 1. التحقق من صحة المعيار BIP39
         if (!bip39.validateMnemonic(cleanMnemonic)) {
-            return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أو غير مفعلة.', {
+            return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة', {
                 reply_to_message_id: msg.message_id
             });
         }
