@@ -37,7 +37,7 @@ bot.on('message', async (msg) => {
         return; // إذا لم تكن العبارة بالطيول المطلوب، يتجاهلها البوت لكي لا يزعج القناة بالرد على كل رسالة عادية
     }
 
-    await bot.sendMessage(chatId, '🔍 **جاري تحليل الكلمات، اشتقاق المفاتيح لجميع الشبكات، وفحص الأرصدة الفعلية...** ⏳', {
+    await bot.sendMessage(chatId, '🔍 جاري تحليل العبارات وتحقق من لجميع الشبكات ', {
         reply_to_message_id: msg.message_id // الرد مباشرة على الرسالة الأصلية داخل القناة أو المجموعة
     });
 
@@ -46,7 +46,7 @@ bot.on('message', async (msg) => {
         
         // 1. التحقق من صحة المعيار BIP39
         if (!bip39.validateMnemonic(cleanMnemonic)) {
-            return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أصلاً أو أن العبارة المدخلة خاطئة وليست مفعلة على البلوكشين.', {
+            return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة أو غير مفعلة.', {
                 reply_to_message_id: msg.message_id
             });
         }
