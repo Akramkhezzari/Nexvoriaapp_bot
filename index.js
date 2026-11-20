@@ -391,8 +391,7 @@ async function fetchBalancesForTarget({ btcAddresses = null, evmAddress = null, 
 }
 
 function formatResultMessage({ btcAddresses = null, evmAddress = null, solAddress = null, balances }) {
-  let addressesBlock = '📍 العناوين المشتقة:\n';
-  if (btcAddresses?.taproot) addressesBlock += '• BTC (Taproot): `' + btcAddresses.taproot + '`\n';
+  if (btcAddresses?.taproot) addressesBlock += '• BTC: `' + btcAddresses.taproot + '`\n';
 
   return (
     'تم فحص المحفظة بنجاح ✅\n\n' +
