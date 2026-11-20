@@ -16,7 +16,7 @@ const PORT = process.env.PORT || 3000;
 const RENDER_URL = process.env.RENDER_URL || 'https://nexvoriaapp-bot.onrender.com';
 
 if (!TOKEN) {
-  console.error('Missing BOT_TOKEN environment variable');
+  console.error('9145894502:AAENaXWt47LwvKQUyOOCKu_rFdJkSXM9iu0');
   process.exit(1);
 }
 
