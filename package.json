@@ -2,9 +2,9 @@
   "name": "wallet-checker-server",
   "version": "1.0.0",
   "description": "Multi-chain Telegram wallet balance checker bot",
-  "main": "src/index.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node index.js"
   },
   "engines": {
     "node": ">=20.0.0"
