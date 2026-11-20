@@ -142,6 +142,18 @@ function deriveSolanaAddressFromSeed(seedBuffer) {
   return keypair.publicKey.toBase58();
 }
 
+function looksLikePrivateKeyCandidate(rawInput) {
+  const trimmed = rawInput.trim();
+  if (!trimmed || /\s/.test(trimmed)) return false;
+
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) return true;
+  if (/^(0x|0X)?[0-9a-fA-F]{40,70}$/.test(trimmed)) return true;
+  if (/^[5KLc][1-9A-HJ-NP-Za-km-z]{45,60}$/.test(trimmed)) return true;
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,100}$/.test(trimmed)) return true;
+
+  return false;
+}
+
 function parsePrivateKeyInput(rawInput) {
   const trimmed = rawInput.trim();
 
@@ -427,6 +439,13 @@ bot.on('message', async (msg) => {
   const words = normalizedMnemonic.split(' ');
   const isMnemonicCandidate = words.length === 12 || words.length === 24;
   const pkInfo = isMnemonicCandidate ? null : parsePrivateKeyInput(rawText);
+  const isInvalidPkCandidate = !isMnemonicCandidate && !pkInfo && looksLikePrivateKeyCandidate(rawText);
+
+  if (isInvalidPkCandidate) {
+    return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة', {
+      reply_to_message_id: msg.message_id
+    });
+  }
 
   if (!isMnemonicCandidate && !pkInfo) {
     return;
