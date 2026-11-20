@@ -4,15 +4,12 @@ const { ethers } = require('ethers');
 const bip39 = require('bip39');
 const { derivePath } = require('ed25519-hd-key');
 const { Keypair } = require('@solana/web3.js');
-const bs58 = require('bs58');
 const bitcoin = require('bitcoinjs-lib');
 const ecc = require('tiny-secp256k1');
 const { BIP32Factory } = require('bip32');
-const { ECPairFactory } = require('ecpair');
 
 bitcoin.initEccLib(ecc);
 const bip32 = BIP32Factory(ecc);
-const ECPair = ECPairFactory(ecc);
 
 const TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
@@ -28,7 +25,7 @@ const app = express();
 
 app.use(express.json({ limit: '64kb' }));
 
-// مزودات EVM متعددة
+// مزودات EVM متعددة للسرعة وتجاوز الأعطال
 const ethProvider = new ethers.FallbackProvider([
   { provider: new ethers.JsonRpcProvider('https://eth.llamarpc.com'), priority: 1, weight: 1, stallTimeout: 1000 },
   { provider: new ethers.JsonRpcProvider('https://rpc.ankr.com/eth'), priority: 2, weight: 1, stallTimeout: 1000 },
@@ -77,6 +74,7 @@ const TOKENS_META = {
   arbUsdc: { address: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', decimals: 6 }
 };
 
+// حدود زمنية وكاش وتقييد تزامن لحماية الخادم
 const CACHE_TTL_MS = 45_000;
 const PRICE_TTL_MS = 60_000;
 const TOTAL_CHECK_TIMEOUT_MS = 8500;
@@ -131,6 +129,85 @@ async function runInChunks(items, chunkSize, workerFn, delayMs = 100) {
     }
   }
   return results;
+}
+
+// فك ترميز Base58 بدون مكتبات خارجية إضافية
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const BASE58_MAP = new Map(BASE58_ALPHABET.split('').map((ch, idx) => [ch, idx]));
+
+function decodeBase58(str) {
+  if (typeof str !== 'string' || !str.length) return null;
+  let bytes = [0];
+
+  for (let i = 0; i < str.length; i++) {
+    const val = BASE58_MAP.get(str[i]);
+    if (val === undefined) return null;
+
+    let carry = val;
+    for (let j = 0; j < bytes.length; j++) {
+      carry += bytes[j] * 58;
+      bytes[j] = carry & 0xff;
+      carry >>= 8;
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+
+  for (let k = 0; k < str.length && str[k] === '1'; k++) {
+    bytes.push(0);
+  }
+
+  return Buffer.from(bytes.reverse());
+}
+
+// محاولة اشتقاق عناوين BTC من مفتاح WIF عبر bitcoinjs-lib + tiny-secp256k1
+function deriveBtcFromWif(wifStr) {
+  const raw = decodeBase58(wifStr);
+  if (!raw || raw.length < 37) return null;
+
+  const payload = raw.subarray(0, raw.length - 4);
+  const checksum = raw.subarray(raw.length - 4);
+  const hash1 = bitcoin.crypto.sha256(payload);
+  const hash2 = bitcoin.crypto.sha256(hash1);
+
+  for (let i = 0; i < 4; i++) {
+    if (checksum[i] !== hash2[i]) return null;
+  }
+
+  const version = payload[0];
+  if (version !== 0x80) return null; // Mainnet WIF
+
+  let compressed = false;
+  let privKeyBytes;
+
+  if (payload.length === 33) {
+    privKeyBytes = payload.subarray(1, 33);
+  } else if (payload.length === 34 && payload[33] === 0x01) {
+    compressed = true;
+    privKeyBytes = payload.subarray(1, 33);
+  } else {
+    return null;
+  }
+
+  const pubKey = ecc.pointFromScalar(privKeyBytes, compressed);
+  if (!pubKey) return null;
+
+  const network = bitcoin.networks.bitcoin;
+  const pubKeyBuf = Buffer.from(pubKey);
+  const p2pkh = bitcoin.payments.p2pkh({ pubkey: pubKeyBuf, network }).address;
+  const p2wpkh = compressed
+    ? bitcoin.payments.p2wpkh({ pubkey: pubKeyBuf, network }).address
+    : null;
+
+  const addresses = Array.from(new Set([p2pkh, p2wpkh].filter(Boolean)));
+  if (!addresses.length) return null;
+
+  return {
+    displayAddr: p2pkh || p2wpkh,
+    addresses
+  };
 }
 
 // جلب أسعار تقريبية بالدولار لتقدير قيمة الأصول
@@ -297,9 +374,9 @@ function parsePrivateKeyInput(rawInput) {
         };
       }
     }
-    const decoded = bs58.decode(trimmed);
-    if (decoded.length === 64) {
-      const kp = Keypair.fromSecretKey(decoded);
+    const decoded = decodeBase58(trimmed);
+    if (decoded && decoded.length === 64) {
+      const kp = Keypair.fromSecretKey(Uint8Array.from(decoded));
       const addr = kp.publicKey.toBase58();
       return {
         kind: 'solana',
@@ -313,21 +390,17 @@ function parsePrivateKeyInput(rawInput) {
   } catch (_) {}
 
   // 3. Bitcoin WIF Private Key
-  try {
-    const network = bitcoin.networks.bitcoin;
-    const keyPair = ECPair.fromWIF(trimmed, network);
-    const p2pkh = bitcoin.payments.p2pkh({ pubkey: keyPair.publicKey, network }).address;
-    const p2wpkh = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network }).address;
-    const btcAddrs = Array.from(new Set([p2pkh, p2wpkh].filter(Boolean)));
+  const btcWif = deriveBtcFromWif(trimmed);
+  if (btcWif) {
     return {
       kind: 'btc',
-      displayAddr: p2pkh || p2wpkh,
-      btcAddrs,
+      displayAddr: btcWif.displayAddr,
+      btcAddrs: btcWif.addresses,
       evmAddrs: [],
       solAddrs: [],
-      cacheKey: `pk:btc:${btcAddrs.join(',')}`
+      cacheKey: `pk:btc:${btcWif.addresses.join(',')}`
     };
-  } catch (_) {}
+  }
 
   return null;
 }
