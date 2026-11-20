@@ -392,12 +392,7 @@ async function fetchBalancesForTarget({ btcAddresses = null, evmAddress = null, 
 
 function formatResultMessage({ btcAddresses = null, evmAddress = null, solAddress = null, balances }) {
   let addressesBlock = '📍 العناوين المشتقة:\n';
-  if (btcAddresses?.nativeSegwit) addressesBlock += '• BTC (Native SegWit): `' + btcAddresses.nativeSegwit + '`\n';
   if (btcAddresses?.taproot) addressesBlock += '• BTC (Taproot): `' + btcAddresses.taproot + '`\n';
-  if (btcAddresses?.nestedSegwit) addressesBlock += '• BTC (Nested SegWit): `' + btcAddresses.nestedSegwit + '`\n';
-  if (btcAddresses?.legacy) addressesBlock += '• BTC (Legacy): `' + btcAddresses.legacy + '`\n';
-  if (evmAddress) addressesBlock += '• EVM (ETH/BNB): `' + evmAddress + '`\n';
-  if (solAddress) addressesBlock += '• SOL: `' + solAddress + '`\n';
 
   return (
     'تم فحص المحفظة بنجاح ✅\n\n' +
@@ -407,10 +402,10 @@ function formatResultMessage({ btcAddresses = null, evmAddress = null, solAddres
     '• ETH: ' + balances.eth + '\n' +
     '• BNB: ' + balances.bsc + '\n' +
     '• SOL: ' + balances.sol + '\n' +
-    '• USDT (ETH): ' + balances.ethUsdt + '\n' +
-    '• USDC (ETH): ' + balances.ethUsdc + '\n' +
-    '• USDT (BSC): ' + balances.bscUsdt + '\n' +
-    '• USDC (BSC): ' + balances.bscUsdc + '\n' +
+    '• USDT: ' + balances.ethUsdt + '\n' +
+    '• USDC: ' + balances.ethUsdc + '\n' +
+    '• USDT: ' + balances.bscUsdt + '\n' +
+    '• USDC: ' + balances.bscUsdc + '\n' +
     '• Crypto actifs: `$0.00`\n\n' +
     '🟢 حالة المحفظة نشطة ومعتمدة نظامياً'
   );
