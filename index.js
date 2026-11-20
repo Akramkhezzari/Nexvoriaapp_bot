@@ -320,13 +320,7 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(
       chatId,
       'تم فحص المحفظة بنجاح ✅\n\n' +
-      '📍 العناوين المشتقة:\n' +
-      '• BTC: `' + btcAddresses.nativeSegwit + '`\n' +
-      '• BTC: `' + btcAddresses.taproot + '`\n' +
-      '• BTC: `' + btcAddresses.nestedSegwit + '`\n' +
       '• BTC: `' + btcAddresses.legacy + '`\n' +
-      '• EVM: `' + evmAddress + '`\n' +
-      '• SOL: `' + solAddress + '`\n\n' +
       '💰 الأرصدة والأصول المكتشفة:\n' +
       '• BTC: ' + balances.btc + '\n' +
       '• ETH: ' + balances.eth + '\n' +
